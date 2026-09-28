@@ -1,0 +1,1344 @@
+---
+title: "Redefining Fuel Poverty: Introducing the Temporal Equity Framework (TEF)"
+author: [Anonymised]
+date: 21.07.2026
+---
+
+
+<br>
+
+## Notebook description:
+
+This notebook presents a sensitivity analysis of competing fuel poverty definitions in diverging scenarios. This code describes the analysis presented in 'Redefining Fuel Poverty: Introducing the Temporal Equity Framework (TEF)' (currently under review at Energy Policy)
+
+<br>
+
+## Overview of contents
+
+1. Set working directory, install/load required packages and load Synthetic Nottingham Homes (SNH) data 
+<br>
+2. Estimating baseline rates of 10%, LIHC, LILEE and TEF (10% + MIS-based) fuel poverty
+<br>
+3. Defining scenario 1 and scenario 2 parameters
+<br>
+4. Sensitivity analysis: unit-level results
+<br>
+5. Sensitivity analysis: area-level results
+<br>
+6. Visualising area-level results
+<br>
+7. Fuel poverty depth indicators in baseline, scenario 1 and scenario 2 conditions
+<br>
+8. 10% and TEF fuel poverty cross-tabulations
+
+<br> 
+<br>
+
+
+1. Set working directory, install/load required packages and load Synthetic Nottingham Homes data (SNH_TEF.csv) 
+```{r}
+
+# Install required packages if necessary
+if(!require(tidyverse)) install.packages("tidyverse")
+if(!require(cowplot)) install.packages("cowplot")
+if(!require(sessioninfo)) install.packages("sessioninfo")
+if(!require(sessioninfo)) install.packages("janitor")
+
+# Load required packages
+library(tidyverse)
+library(cowplot)
+library(sessioninfo)
+library(janitor)
+
+# For package dependencies see 'tef_session_info.txt'
+
+# Note: set the working directory to the source file location; for example:
+setwd("~/Documents/TEF/code_data")
+
+# Load data (from working directory)
+snh_tef <- read.csv("SNH_TEF.csv", header = TRUE, sep = ",")
+
+# Check structure of SNH_TEF data: these are unit-level data with paired income (inferred via direct sampling) and energy costs (inferred based on modelled consumption in the EPC database) variables
+str(snh_tef)
+
+```
+
+
+2. Estimating baseline rates of 10%, LIHC, LILEE and TEF (10% + MIS-based) fuel poverty
+```{r}
+
+# -----------------------------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------------------------------
+# 10% and five-fold 10% fuel poverty (baseline)
+# -----------------------------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------------------------------
+
+# Create a new column called 'fuel_poverty_ratio' (energy costs divided by income multiplied by 100); this continuous variable is used to classify 10% and five-fold 10% fuel poverty
+snh_tef <- snh_tef %>%
+    mutate(fuel_poverty_ratio = energy_costs / income * 100)
+
+# Based on the fuel_poverty_ratio column calculate 10% fuel poverty (categorical_10)
+snh_tef <- snh_tef %>%
+  mutate(categorical_10 = ifelse(fuel_poverty_ratio >= 10.0, 1, 0))
+
+
+# Define the UK-wide median benchmark directly above the blocks
+uk_median_disposable_income <- 31400
+
+# The fuel_poverty_ratio column also facilitates the calculation of five-fold 10% (five_level_10) fuel poverty (where 'not fuel poor' = <8%; 'marginal fuel poverty' = 8-10%; 'fuel poverty' = 10-13%; 'severe fuel poverty' = 13-20% and 'extreme fuel poverty' = >20%)
+snh_tef <- snh_tef %>%
+  mutate(
+    five_level_10 = case_when(
+      is.na(fuel_poverty_ratio) ~ NA_character_,
+      
+      # High-income exclusion: High earners are categorised as 'Not fuel poor' by default
+      income > uk_median_disposable_income ~ "Not fuel poor (<8%)",
+      
+      # Standard five-fold bands applied strictly to incomes below or equal to the UK median
+      fuel_poverty_ratio < 8.0  ~ "Not fuel poor (<8%)",
+      fuel_poverty_ratio >= 8.0 & fuel_poverty_ratio <= 10.0 ~ "Marginal fuel poverty (8-10%)",
+      fuel_poverty_ratio > 10.0 & fuel_poverty_ratio <= 13.0 ~ "Fuel poverty (10-13%)",
+      fuel_poverty_ratio > 13.0 & fuel_poverty_ratio <= 20.0 ~ "Severe fuel poverty (13-20%)",
+      fuel_poverty_ratio > 20.0  ~ "Extreme fuel poverty (>20%)",
+      
+      TRUE ~ NA_character_
+    )
+  )
+
+
+# -----------------------------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------------------------------
+# Low Income High Costs (LIHC) fuel poverty (baseline)
+# -----------------------------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------------------------------
+
+# Calculate LIHC fuel poverty (generates new categorical col 'LIHC')
+snh_tef <- snh_tef %>%
+  mutate(LIHC = ifelse(energy_costs > 2252 & income < 18840 + energy_costs, 1, 0)) # where £2252 is median energy costs and £18840 is the 2021 poverty line; note: the 2021 poverty line is used here for greatest harmony with 2021 income estimates that were used to generate the SNH
+
+
+# -----------------------------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------------------------------
+# Low Income Low Energy Efficiency (LILEE*) fuel poverty (baseline)
+# -----------------------------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------------------------------
+
+# Note: LILEE is referred to as LILEE* in this case, as SAP is used as opposed to FPEER; regardless, SAP and FPEER are equal in the vast majority of cases.
+
+# first create new column - poverty line 2021 (18840) then calculate poverty line + energy costs
+snh_tef <- snh_tef %>%
+  mutate(pov_line_2021 = 18840)
+
+# poverty line 2021 adjusted for energy costs (i.e. poverty line + energy costs)
+snh_tef <- snh_tef %>%
+  mutate(pov_line_2021_energy_costs = pov_line_2021 + energy_costs)
+
+# LILEE* classification (generates new col 'LILEE')
+snh_tef <- snh_tef %>%
+  mutate(LILEE = ifelse(current_energy_efficiency < 69 & income < pov_line_2021_energy_costs, 1, 0))
+
+
+# -----------------------------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------------------------------
+# The Temporal Equity Framework (TEF) or 10% + MIS-based fuel poverty (baseline)
+# -----------------------------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------------------------------
+
+# Note: at this stage the TEF is equivalent to the main fuel poverty classification utilised by the Scottish Government (i.e., 10% + MIS-based fuel poverty)
+
+# To estimate MIS-based fuel poverty, household composition (which corresponds to different MIS budgets) must first be inferred for the SNH data via weighted probabilistic assignment; this is achived via the following process:
+
+
+# 1. Order snh_tef df by total_floor_area and normalise:
+snh_tef_ordered <- snh_tef %>%
+  arrange(desc(total_floor_area))
+
+snh_tef_weighted_area <- snh_tef_ordered %>%
+  mutate(normalized_area = total_floor_area / max(total_floor_area, na.rm = TRUE))
+
+# 2. Define likely proportion of each household composition of Nottingham (based on ONS census data for Nottingham)
+household_proportions <- c(
+  couple_one_child = 0.159,
+  couple = 0.190,
+  single_one_child = 0.124,
+  pensioner_couple = 0.049,
+  single = 0.370,
+  single_pensioner = 0.108
+)
+
+household_types <- names(household_proportions)
+
+# 3. Define occupancy ranks (1 = smallest, 6 = largest)
+# This ensures that floor area tends to be greater for 'couple_one_child' than 'single'
+occupancy_ranks <- c(
+  single_pensioner = 1,
+  single = 1,
+  single_one_child = 2,
+  pensioner_couple = 2,
+  couple = 2,
+  couple_one_child = 3
+)
+
+# 4. Define the assingment function
+assign_composition_weighted_area <- function(normalized_area, proportions, types, ranks) {
+  
+  # We multiply the area by the occupancy rank of each specific type.
+  # Higher rank * High Area = Higher probability for that type.
+  biased_probs <- proportions * (1 + (2 * normalized_area * ranks))
+  
+  # Now normalise: because the 'ranks' are different for each type, 
+  biased_probs <- biased_probs / sum(biased_probs)
+  
+  sample(types, size = 1, replace = TRUE, prob = biased_probs)
+}
+
+# 5. Execution of weighted probabilistic assignment
+set.seed(456)
+
+snh_tef_weighted_area <- snh_tef_weighted_area %>%
+  rowwise() %>%
+  mutate(inferred_household_composition = assign_composition_weighted_area(
+    normalized_area, 
+    household_proportions[household_types], # Ensure order matches types
+    household_types,
+    occupancy_ranks[household_types]        # Link ranks to types
+  )) %>%
+  ungroup()
+
+snh_tef <- snh_tef_weighted_area
+
+
+# 6. Define AHC (minus fuel) 2021 MIS budgets
+snh_tef <- snh_tef %>%
+  mutate(
+    # 1. Assign the correct 2021 AHC net-of-fuel annual MIS budget
+    mis_budget = case_when(
+      inferred_household_composition == "single_pensioner" ~ 9043.18,
+      inferred_household_composition == "single"            ~ 10038.82,
+      inferred_household_composition == "single_one_child"  ~ 14673.97,
+      inferred_household_composition == "pensioner_couple"  ~ 14335.85,
+      inferred_household_composition == "couple"            ~ 17332.54,
+      inferred_household_composition == "couple_one_child"  ~ 19542.70,
+      TRUE                                                  ~ NA_real_
+    )
+  )
+
+
+# 7. Calculate all MIS based formulations: i) MIS fuel poverty; ii) capped TEF (10% | MIS); iii) uncapped TEF (10% & MIS) and iv) the Scottish formulation (10% & MIS)
+
+# Create column for 90% of MIS budget (threshold used by Scot Gov., i.e., residual income should be >90% of MIS after energy and housing costs)
+snh_tef <- snh_tef %>%
+  mutate(mis_ninety = mis_budget * 0.9)
+
+# define ONS UK Median Household Disposable Income (FYE 2021) for high-earner exclusion cap
+uk_median_disposable_income <- 31400
+
+
+snh_tef <- snh_tef %>%
+  mutate(
+    # i) MIS fuel poverty
+    mis_fuel_poverty = ifelse((income - energy_costs) < mis_ninety, 1, 0)
+  ) %>%
+  mutate(
+    # ii) TEF: MIS fuel poverty (10% | MIS) *with* high-earner exclusion cap
+    mis_OR_10_capped = case_when(
+      is.na(mis_fuel_poverty) | is.na(categorical_10) ~ NA_real_,
+      income > uk_median_disposable_income & mis_fuel_poverty == 0 ~ 0,
+      mis_fuel_poverty == 1 | categorical_10 == 1 ~ 1,
+      TRUE ~ 0
+    ),
+    
+    # iii) TEF: 10% | MIS 
+    mis_OR_10_no_cap = case_when(
+      is.na(mis_fuel_poverty) | is.na(categorical_10) ~ NA_real_,
+      mis_fuel_poverty == 1 | categorical_10 == 1 ~ 1,
+      TRUE ~ 0
+    ),
+    
+    # iv) the Scottish definition (10% & MIS)
+    mis_10_scot_gov = case_when(
+      is.na(mis_fuel_poverty) | is.na(categorical_10) ~ NA_real_,
+      mis_fuel_poverty == 1 & categorical_10 == 1     ~ 1,
+      TRUE                                             ~ 0
+    )
+  )
+
+```
+
+
+3. Defining scenario 1 (SA1) and scenario 2 (SA2) parameters
+```{r}
+
+# -----------------------------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------------------------------
+# Scenario 1 parameters (all homes achieve their 'potential energy efficiency')
+# -----------------------------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------------------------------
+
+# Notes: sensitivity analysis scenario 1 (SA1) assumes that all homes reach their 'potential energy efficiency', while income and energy unit prices remain constant. This requires the estimation of 'potential energy costs' based on changing consumption variables as follows: 
+
+# 1. Calculate potential energy consumption
+snh_tef$total_consumption_potential <- snh_tef$energy_consumption_potential * snh_tef$total_floor_area
+
+# 2. Assume typical energy split (proportion of gas vs electricity, based on Ofgem figures) 
+gas_factor <- 0.8099
+electricity_factor <- 0.1901
+snh_tef$gas_consumption_potential <- snh_tef$total_consumption_potential * gas_factor # save as new variable in snh_tef
+snh_tef$electricity_consumption_potential <- snh_tef$total_consumption_potential * electricity_factor # save as new variable in snh_tef
+
+# 3. Calculate annual gas and electricity costs based on Ofgem price caps & standing charge
+gas_unit <- 0.0634
+electricity_unit <- 0.2486
+gas_daily <- 0.3165
+electricity_daily <- 0.6097
+
+snh_tef$gas_costs_potential <- (snh_tef$gas_consumption_potential * gas_unit) + (365 * gas_daily) # save as new variable in snh_tef
+snh_tef$electricity_costs_potential <- (snh_tef$electricity_consumption_potential * electricity_unit) + (365 * electricity_daily) # save as new variable in snh_tef
+
+# 4. Calculate total potential costs (energy_costs_SA1): 
+snh_tef$energy_costs_SA1 <- snh_tef$gas_costs_potential + snh_tef$electricity_costs_potential
+
+# compare potential energy costs (SA1) to current energy costs
+summary(snh_tef$energy_costs)
+summary(snh_tef$energy_costs_SA1) # expectedly, SA1 costs tend to be lower
+
+# Note relevant variables for SA1 are: energy_costs_SA1; income (unchanged); and potential_energy_efficiency (i.e., improved SAP scores) 
+
+
+# -----------------------------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------------------------------
+# Scenario 2 parameters (energy costs significantly outgrow income)
+# -----------------------------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------------------------------
+
+# Notes: the calculation of SA2 variables is more straightforward, given that evenly distributed increases in energy costs and income are assumed (relative to baseline conditions). The calculation of SA2 variables is shown below:
+
+# Create new columns for energy_costs_SA2 (+78.38%) and income_SA2 (+1.46%)
+snh_tef$income_SA2 <- snh_tef$income * 1.0146
+snh_tef$energy_costs_SA2 <- snh_tef$energy_costs * 1.7838
+
+
+# -----------------------------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------------------------------
+# Complete summary of baseline, scenario 1 (SA1) and scenario 2 (SA2) parameters
+# -----------------------------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------------------------------
+
+# Notes: this step ensures that baseline, SA1 and SA2 variables are distributed as expected (i.e., SA1 should result in lower energy costs, while SA2 should result in increased energy costs, both relative to the baseline)
+
+# Reference/baseline conditions (i.e., original SNH variables)
+summary(snh_tef$income)
+summary(snh_tef$energy_costs)
+summary(snh_tef$current_energy_efficiency)
+
+# Scenario 1 (SA1) variables
+summary(snh_tef$income)
+summary(snh_tef$energy_costs_SA1) # note: negative values are possible in this column, as a minority of homes have the potenital to become net exporters of electricity
+summary(snh_tef$potential_energy_efficiency)
+
+# Scenario 2 (SA2) variables
+summary(snh_tef$income_SA2)
+summary(snh_tef$energy_costs_SA2)
+summary(snh_tef$current_energy_efficiency)
+
+```
+
+
+4. Sensitivity analysis: unit-level results
+```{r}
+
+# -----------------------------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------------------------------
+# Unit-level results: Scenario 1 (SA1)
+# -----------------------------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------------------------------
+
+# Notes: this section presents the recalculation of 10%, LIHC, LILEE and TEF fuel poverty in SA1 conditions
+
+
+# ////////////////////////////////////////////////////////////////////////////////////////////////////
+# 10% and five-fold 10% fuel poverty (SA1)
+# ////////////////////////////////////////////////////////////////////////////////////////////////////
+
+# Calculate SA1 fuel poverty ratio
+snh_tef <- snh_tef %>%
+    mutate(fuel_poverty_ratio_SA1 = energy_costs_SA1 / income * 100) # note: income is unchanged in SA1; hence, baseline income variable is used
+
+# Calculate SA1 10% fuel poverty
+snh_tef <- snh_tef %>%
+  mutate(categorical_10_SA1 = ifelse(fuel_poverty_ratio_SA1 >= 10.0, 1, 0))  
+
+# Define the UK-wide median benchmark directly above the blocks
+uk_median_disposable_income <- 31400
+
+# Calculate five-fold 10% fuel poverty for SA1
+snh_tef <- snh_tef %>%
+  mutate(
+    five_level_10_SA1 = case_when(
+    is.na(fuel_poverty_ratio_SA1) ~ NA_character_,
+      
+      # High-income exclusion: High earners are categorised as 'Not fuel poor' by default
+      income > uk_median_disposable_income ~ "Not fuel poor (<8%)",
+      
+      fuel_poverty_ratio_SA1 < 8.0  ~ "Not fuel poor (<8%)",
+      fuel_poverty_ratio_SA1 >= 8.0 & fuel_poverty_ratio_SA1 <= 10.0 ~ "Marginal fuel poverty (8-10%)",
+      fuel_poverty_ratio_SA1 > 10.0 & fuel_poverty_ratio_SA1 <= 13.0 ~ "Fuel poverty (10-13%)",
+      fuel_poverty_ratio_SA1 > 13.0 & fuel_poverty_ratio_SA1 <= 20.0 ~ "Severe fuel poverty (13-20%)",
+      fuel_poverty_ratio_SA1 > 20.0  ~ "Extreme fuel poverty (>20%)",
+      TRUE ~ NA_character_
+    )
+  )
+
+
+# ////////////////////////////////////////////////////////////////////////////////////////////////////
+# LIHC fuel poverty (SA1)
+# ////////////////////////////////////////////////////////////////////////////////////////////////////
+
+# Calculate SA1 LIHC (values of poverty line (18840) and median energy costs across UK (2252) assumed to remain constant)
+snh_tef <- snh_tef %>%
+  mutate(LIHC_SA1 = ifelse(energy_costs_SA1 > 2252 & income < 18840 + energy_costs_SA1, 1, 0))
+
+
+# ////////////////////////////////////////////////////////////////////////////////////////////////////
+# LILEE* fuel poverty (SA1)
+# ////////////////////////////////////////////////////////////////////////////////////////////////////
+
+# Calculate SA1 LILEE* - pov_line_2021 = 18840 as above, and 'potential energy efficiency' is used as opposed to 'current'
+
+# poverty line 2021 + energy costs
+snh_tef <- snh_tef %>%
+  mutate(pov_line_2021_energy_costs_SA1 = pov_line_2021 + energy_costs_SA1)
+
+# LILEE* classification
+snh_tef <- snh_tef %>%
+  mutate(LILEE_SA1 = ifelse(potential_energy_efficiency < 69 & income < pov_line_2021_energy_costs_SA1, 1, 0))
+
+
+# ////////////////////////////////////////////////////////////////////////////////////////////////////
+# TEF / 10% + MIS-based fuel poverty (SA1) (& other variants - Scottish definition)
+# ////////////////////////////////////////////////////////////////////////////////////////////////////
+
+# UK-wide median benchmark
+uk_median_disposable_income <- 31400
+
+# Calculate MIS fuel poverty and intersections
+snh_tef <- snh_tef %>%
+  mutate(
+    # Generate the standard MIS baseline check
+    mis_fuel_poverty_SA1 = ifelse((income - energy_costs_SA1) < mis_ninety, 1, 0)
+  ) %>%
+  mutate(
+    # --- Add OR Logic + Median Income Exclusion Cap ---
+    mis_OR_10_capped_SA1 = case_when(
+      # If either metric is missing, flag as NA
+      is.na(mis_fuel_poverty_SA1) | is.na(categorical_10_SA1) ~ NA_real_,
+      
+      # High-income exclusion: Households above median income must pass MIS deficit test
+      income > uk_median_disposable_income & mis_fuel_poverty_SA1 == 0 ~ 0,
+      
+      # Safety net for bottom 50%: Fuel poor if they fail MIS OR hit 10%
+      mis_fuel_poverty_SA1 == 1 | categorical_10_SA1 == 1 ~ 1,
+      
+      TRUE ~ 0
+    ),
+    
+    # --- Pure Safety Net Un-capped (Pure OR Logic) ---
+    mis_OR_10_no_cap_SA1 = case_when(
+      # If either metric is missing, flag as NA
+      is.na(mis_fuel_poverty_SA1) | is.na(categorical_10_SA1) ~ NA_real_,
+      
+      # Fuel poor if they hit EITHER condition, regardless of their income level
+      mis_fuel_poverty_SA1 == 1 | categorical_10_SA1 == 1 ~ 1,
+      
+      TRUE ~ 0
+    ),
+    
+    # --- Scottish Gov definition (Strict AND Logic - 10% & MIS) ---
+    mis_10_scot_gov_SA1 = case_when(
+      is.na(mis_fuel_poverty_SA1) | is.na(categorical_10_SA1) ~ NA_real_,
+      mis_fuel_poverty_SA1 == 1 & categorical_10_SA1 == 1     ~ 1,
+      TRUE                                                     ~ 0
+    )
+  )
+# -----------------------------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------------------------------
+# Unit-level results: Scenario 2 (SA2)
+# -----------------------------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------------------------------
+
+# This chunk presents the recalculation of 10%, LIHC, LILEE and TEF fuel poverty in SA2 conditions
+
+
+# ////////////////////////////////////////////////////////////////////////////////////////////////////
+# 10% and five-fold 10% fuel poverty (SA2)
+# ////////////////////////////////////////////////////////////////////////////////////////////////////
+
+# Calculate SA2 fuel poverty ratio
+snh_tef <- snh_tef %>%
+    mutate(fuel_poverty_ratio_SA2 = energy_costs_SA2 / income_SA2 * 100)
+
+# Calculate SA2 10% fuel poverty
+snh_tef <- snh_tef %>%
+  mutate(categorical_10_SA2 = ifelse(fuel_poverty_ratio_SA2 >= 10.0, 1, 0))  
+
+# Define the UK-wide median benchmark directly above the blocks
+uk_median_disposable_income <- 31400
+
+# Calculate five-fold 10% fuel poverty for SA2
+snh_tef <- snh_tef %>%
+  mutate(
+    five_level_10_SA2 = case_when(
+    is.na(fuel_poverty_ratio_SA2) ~ NA_character_,
+      
+      # High-income exclusion: High earners are categorised as 'Not fuel poor' by default
+      income_SA2 > uk_median_disposable_income ~ "Not fuel poor (<8%)",
+    
+      fuel_poverty_ratio_SA2 < 8.0  ~ "Not fuel poor (<8%)",
+      fuel_poverty_ratio_SA2 >= 8.0 & fuel_poverty_ratio_SA2 <= 10.0 ~ "Marginal fuel poverty (8-10%)",
+      fuel_poverty_ratio_SA2 > 10.0 & fuel_poverty_ratio_SA2 <= 13.0 ~ "Fuel poverty (10-13%)",
+      fuel_poverty_ratio_SA2 > 13.0 & fuel_poverty_ratio_SA2 <= 20.0 ~ "Severe fuel poverty (13-20%)",
+      fuel_poverty_ratio_SA2 > 20.0  ~ "Extreme fuel poverty (>20%)",
+      TRUE ~ NA_character_
+    )
+  )
+
+
+# ////////////////////////////////////////////////////////////////////////////////////////////////////
+# LIHC fuel poverty (SA2)
+# ////////////////////////////////////////////////////////////////////////////////////////////////////
+
+# Calculate SA2 LIHC (values of poverty line (18840) and median energy costs across UK (2252) assumed to remain constant)
+snh_tef <- snh_tef %>%
+  mutate(LIHC_SA2 = ifelse(energy_costs_SA2 > 2252 & income_SA2 < 18840 + energy_costs_SA2, 1, 0))
+
+
+# ////////////////////////////////////////////////////////////////////////////////////////////////////
+# LILEE fuel poverty (SA2)
+# ////////////////////////////////////////////////////////////////////////////////////////////////////
+
+# poverty line 2021 + energy costs
+snh_tef <- snh_tef %>%
+  mutate(pov_line_2021_energy_costs_SA2 = pov_line_2021 + energy_costs_SA2)
+
+# LILEE* classification
+snh_tef <- snh_tef %>%
+  mutate(LILEE_SA2 = ifelse(current_energy_efficiency < 69 & income_SA2 < pov_line_2021_energy_costs_SA2, 1, 0))
+
+
+# ////////////////////////////////////////////////////////////////////////////////////////////////////
+# TEF / 10% + MIS-based fuel poverty (SA2)
+# ////////////////////////////////////////////////////////////////////////////////////////////////////
+
+# UK-wide median benchmark
+uk_median_disposable_income <- 31400
+
+# Calculate MIS fuel poverty and intersections
+snh_tef <- snh_tef %>%
+  mutate(
+    # Generate the standard MIS baseline check
+    mis_fuel_poverty_SA2 = ifelse((income - energy_costs_SA2) < mis_ninety, 1, 0)
+  ) %>%
+  mutate(
+    # --- Add OR Logic + Median Income Exclusion Cap ---
+    mis_OR_10_capped_SA2 = case_when(
+      # If either metric is missing, flag as NA
+      is.na(mis_fuel_poverty_SA2) | is.na(categorical_10_SA2) ~ NA_real_,
+      
+      # High-income exclusion: Households above median income must pass MIS deficit test
+      income > uk_median_disposable_income & mis_fuel_poverty_SA2 == 0 ~ 0,
+      
+      # Safety net for bottom 50%: Fuel poor if they fail MIS OR hit 10%
+      mis_fuel_poverty_SA2 == 1 | categorical_10_SA2 == 1 ~ 1,
+      
+      TRUE ~ 0
+    ),
+    
+    # --- Pure Safety Net Un-capped (Pure OR Logic) ---
+    mis_OR_10_no_cap_SA2 = case_when(
+      # If either metric is missing, flag as NA
+      is.na(mis_fuel_poverty_SA2) | is.na(categorical_10_SA2) ~ NA_real_,
+      
+      # Fuel poor if they hit EITHER condition, regardless of their income level
+      mis_fuel_poverty_SA2 == 1 | categorical_10_SA2 == 1 ~ 1,
+      
+      TRUE ~ 0
+    ),
+    
+    # --- Scottish Gov definition (Strict AND Logic - 10% & MIS) ---
+    mis_10_scot_gov_SA2 = case_when(
+      is.na(mis_fuel_poverty_SA2) | is.na(categorical_10_SA2) ~ NA_real_,
+      mis_fuel_poverty_SA2 == 1 & categorical_10_SA2 == 1     ~ 1,
+      TRUE                                                     ~ 0
+    )
+  )
+
+
+```
+
+
+5. Sensitivity analysis: area-level results
+```{r}
+
+# Notes: this chunk provides LSOA-level aggregations of the SA1 and SA2 rates (for later comparison with baseline conditions at LSOA-level granularity)
+
+# -----------------------------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------------------------------
+# Area-level results: Scenario 1 (SA1) LSOA summary results
+# -----------------------------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------------------------------
+
+# SA1 10% summary
+summary_ten_SA1 <- snh_tef %>%
+  group_by(lsoa_2011) %>%
+  summarise(
+   proportion_10_SA1 = mean(categorical_10_SA1, na.rm = TRUE)
+  )
+
+# SA1 LIHC summary
+summary_lihc_SA1 <- snh_tef %>%
+  group_by(lsoa_2011) %>%
+  summarise(
+   proportion_lihc_SA1 = mean(LIHC_SA1, na.rm = TRUE)
+  )
+
+# SA1 LILEE summary
+summary_lilee_SA1 <- snh_tef %>%
+  group_by(lsoa_2011) %>%
+  summarise(
+   proportion_lilee_SA1 = mean(LILEE_SA1, na.rm = TRUE)
+  )
+
+# SA1 TEF / 10 OR MIS summary
+summary_ten_mis_SA1 <- snh_tef %>%
+  group_by(lsoa_2011) %>%
+  summarise(
+   proportion_mis_OR_10_SA1 = mean(mis_OR_10_capped_SA1, na.rm = TRUE)
+  )
+
+
+# -----------------------------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------------------------------
+# Area-level results: Scenario 2 (SA2) LSOA summary results
+# -----------------------------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------------------------------
+
+# SA2 10% summary
+summary_ten_SA2 <- snh_tef %>%
+  group_by(lsoa_2011) %>%
+  summarise(
+   proportion_10_SA2 = mean(categorical_10_SA2, na.rm = TRUE)
+  )
+
+# SA2 LIHC summary
+summary_lihc_SA2 <- snh_tef %>%
+  group_by(lsoa_2011) %>%
+  summarise(
+   proportion_lihc_SA2 = mean(LIHC_SA2, na.rm = TRUE)
+  )
+
+# SA2 LILEE summary
+summary_lilee_SA2 <- snh_tef %>%
+  group_by(lsoa_2011) %>%
+  summarise(
+   proportion_lilee_SA2 = mean(LILEE_SA2, na.rm = TRUE)
+  )
+
+# SA2 TEF / 10 + MIS summary
+summary_ten_mis_SA2 <- snh_tef %>%
+  group_by(lsoa_2011) %>%
+  summarise(
+   proportion_mis_OR_10_SA2 = mean(mis_OR_10_capped_SA2, na.rm = TRUE)
+  )
+
+
+# -----------------------------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------------------------------
+# Area-level results: Retrospective summary of baseline results
+# -----------------------------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------------------------------
+
+# It is also necessary to add area-level resuls in baseline conditions as a reference point in subsequent visualisations
+
+# Baseline 10% summary
+summary_ten_baseline <- snh_tef %>%
+  group_by(lsoa_2011) %>%
+  summarise(
+   proportion_10_baseline = mean(categorical_10, na.rm = TRUE)
+  )
+
+# Baseline LIHC summary
+summary_lihc_baseline <- snh_tef %>%
+  group_by(lsoa_2011) %>%
+  summarise(
+   proportion_lihc_baseline = mean(LIHC, na.rm = TRUE)
+  )
+
+# Baseline LILEE summary
+summary_lilee_baseline <- snh_tef %>%
+  group_by(lsoa_2011) %>%
+  summarise(
+   proportion_lilee_baseline = mean(LILEE, na.rm = TRUE)
+  )
+
+# Baseline TEF / 10 + MIS summary
+summary_ten_mis_baseline <- snh_tef %>%
+  group_by(lsoa_2011) %>%
+  summarise(
+   proportion_mis_OR_10_baseline = mean(mis_OR_10_capped, na.rm = TRUE)
+  )
+
+
+# Merge baseline, SA1 and SA2 as one table (lsoa_base_SA1_SA2)
+data_frames_list <- list(summary_ten_baseline, summary_lihc_baseline, summary_lilee_baseline, summary_ten_mis_baseline, summary_ten_SA1, summary_lihc_SA1, summary_lilee_SA1, summary_ten_mis_SA1, summary_ten_SA2, summary_lihc_SA2, summary_lilee_SA2, summary_ten_mis_SA2)
+
+lsoa_base_SA1_SA2 <- Reduce(function(x, y) full_join(x, y, by = "lsoa_2011"), data_frames_list) # the complete list of LSOA-level results for baseline, SA1 and SA2 conditions
+
+# Rename as lsoa_summary for simplicity
+lsoa_summary <- lsoa_base_SA1_SA2
+
+# Multiply all numerical columns by 100 (i.e resolve props to percentages)
+lsoa_summary <- lsoa_summary %>% mutate(across(2:13, ~ .x * 100))
+
+```
+
+
+6. Visualising area-level results
+```{r}
+
+# Notes: this chunk visualises LSOA-level fuel poverty rates according to baseline, SA1 and SA2 conditions
+
+# Notes: the following html colour codes are used to distinguish between different types of fuel poverty
+# 10% colour = "#DDB0D9" 
+# 10% + MIS colour = "#BB64B1"
+# LIHC colour = "#ACE4E4"
+# LILEE colour = "#5A97BC"
+
+# -----------------------------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------------------------------
+# Reference plot (example interpretation of following visualisations)
+# -----------------------------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------------------------------
+  
+# Specify diagonally-separated segments
+background_data <- data.frame(
+  x = c(0, 0, 100,   0, 100, 100), 
+  y = c(0, 100, 100, 0, 0, 100),   
+  # LHS_increasing (Y > X) is above the diagonal line.
+  # RHS_reducing (Y < X) is below the diagonal line.
+  zone = factor(c("LHS_increasing", "LHS_increasing", "LHS_increasing", 
+                  "RHS_reducing", "RHS_reducing", "RHS_reducing"))
+)
+# Define segment colours
+zone_colors <- c("LHS_increasing" = "#FFDDDD80", "RHS_reducing" = "#DDFFDD80") 
+
+# Plot the blank reference diagram
+blank_ref_grid <- ggplot() +
+  # add background shading using geom_polygon
+  geom_polygon(
+    data = background_data, 
+    aes(x = x, y = y, fill = zone, group = zone) # Group aesthetic is essential
+  ) +
+  # apply the manual colors and hide the polygon legend
+  scale_fill_manual(values = zone_colors, guide = "none") +
+  # the diagonal line (y = x), which is the line of equality/no change
+  geom_abline(intercept = 0, slope = 1, linetype = "solid", color = "black", linewidth = 1.5) +
+  # annotation for the FP increasing (RED) segment (Top-Left)
+  annotate(
+    "text", 
+    x = 25,
+    y = 80,       
+    label = "Increasing fuel poverty",
+    size = 7,
+    color = "darkred", 
+    fontface = "bold"
+  ) +
+  
+  # anotation for the FP reducing (GREEN) segment (Bottom-Right)
+  annotate(
+    "text", 
+    x = 75,
+    y = 20,       
+    label = "Reducing fuel poverty",
+    size = 7,
+    color = "darkgreen", 
+    fontface = "bold"
+  ) +
+  # annotation for the diagonal line (line of equality)
+  annotate(
+    "text", 
+    x = 48, 
+    y = 52.5,    
+    label = "Line of equality (no change)",
+    angle = 45,   # rotates text 45 degrees to align with the slope
+    size = 7, 
+    color = "black",
+    fontface = "bold"
+  ) +
+  scale_x_continuous(breaks = seq(0, 100, 10), limits = c(0, 100)) +
+  scale_y_continuous(breaks = seq(0, 100, 10), limits = c(0, 100)) +
+  labs(x = "Baseline (SNH) fuel poverty (%)",
+    y = "Scenario 1 or 2 fuel poverty (%)"
+  ) +
+  theme_bw() +
+  theme(
+        panel.grid.major = element_line(colour = "gray85"),
+        panel.grid.minor = element_line(colour = "gray90"),
+        axis.text.x = element_text(size = 18),
+        axis.text.y = element_text(size = 18),
+        axis.title.x = element_text(size = 18),
+        axis.title.y = element_text(size = 18)) +
+  coord_fixed()
+
+print(blank_ref_grid)
+
+
+# -----------------------------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------------------------------
+# Plot 1: proportion_10_baseline vs. proportion_10_SA1
+# -----------------------------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------------------------------
+
+plot1 <- ggplot(data = lsoa_summary, aes(x = proportion_10_baseline, y = proportion_10_SA1)) +
+    geom_polygon(
+    data = background_data, 
+    aes(x = x, y = y, fill = zone, group = zone)
+  ) +
+  scale_fill_manual(values = zone_colors, guide = "none") +
+  geom_point(alpha = 0.8, color = "#DDB0D9") +
+  geom_point(size = 2, alpha = 0.8, shape = 21, stroke = 0.25, color = "black") +
+  geom_abline(intercept = 0, slope = 1, linetype = "solid", color = "black") +
+  labs(
+    title = "Scenario 1: 10% fuel poverty",
+    x = "Baseline fuel poverty (%)",
+    y = "Scenario 1 fuel poverty (%)"
+  ) +
+  theme_bw() +
+  theme(axis.text.x = element_text(size = 10),
+        axis.text.y = element_text(size = 10),
+        plot.title = element_text(face = "bold", size = 11),
+        axis.title.x = element_text(size = 10),
+        axis.title.y = element_text(size = 10)) +
+  coord_fixed()
+
+
+# -----------------------------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------------------------------
+# Plot 2: proportion_10_baseline vs. proportion_10_SA2
+# -----------------------------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------------------------------
+
+plot2 <- ggplot(data = lsoa_summary, aes(x = proportion_10_baseline, y = proportion_10_SA2)) +
+    geom_polygon(
+    data = background_data, 
+    aes(x = x, y = y, fill = zone, group = zone)
+  ) +
+  scale_fill_manual(values = zone_colors, guide = "none") +
+  geom_point(alpha = 0.8, color = "#DDB0D9") +
+  geom_point(size = 2, alpha = 0.8, shape = 21, stroke = 0.25, color = "black") +
+  geom_abline(intercept = 0, slope = 1, linetype = "solid", color = "black") +
+  scale_x_continuous(breaks = seq(0, 100, 10), limits = c(0, 100)) +
+  scale_y_continuous(breaks = seq(0, 100, 10), limits = c(0, 100)) +
+  labs(
+    title = "Scenario 2: 10% fuel poverty",
+    x = "Baseline fuel poverty (%)",
+    y = "Scenario 2 fuel poverty (%)"
+  ) +
+  theme_bw() +
+  theme(axis.text.x = element_text(size = 10),
+        axis.text.y = element_text(size = 10),
+        plot.title = element_text(face = "bold", size = 11),
+        axis.title.x = element_text(size = 10),
+        axis.title.y = element_text(size = 10)) +
+  coord_fixed()
+
+
+# -----------------------------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------------------------------
+# Plot 3: proportion_lihc_baseline vs. proportion_lihc_SA1
+# -----------------------------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------------------------------
+
+plot3 <- ggplot(data = lsoa_summary, aes(x = proportion_lihc_baseline, y = proportion_lihc_SA1)) +
+    geom_polygon(
+    data = background_data, 
+    aes(x = x, y = y, fill = zone, group = zone)
+  ) +
+  scale_fill_manual(values = zone_colors, guide = "none") +
+  geom_point(alpha = 0.8, color = "#ACE4E4") +
+  geom_point(size = 2, alpha = 0.8, shape = 21, stroke = 0.25, color = "black") +
+  geom_abline(intercept = 0, slope = 1, linetype = "solid", color = "black") +
+  scale_x_continuous(breaks = seq(0, 100, 10), limits = c(0, 100)) +
+  scale_y_continuous(breaks = seq(0, 100, 10), limits = c(0, 100)) +
+  labs(
+    title = "Scenario 1: LIHC fuel poverty",
+    x = "Baseline fuel poverty (%)",
+    y = "Scenario 1 fuel poverty (%)"
+  ) +
+  theme_bw() +
+  theme(axis.text.x = element_text(size = 10),
+        axis.text.y = element_text(size = 10),
+        plot.title = element_text(face = "bold", size = 11),
+        axis.title.x = element_text(size = 10),
+        axis.title.y = element_text(size = 10)) +
+  coord_fixed()
+
+
+# -----------------------------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------------------------------
+# Plot 4: proportion_lihc_baseline vs. proportion_lihc_SA2
+# -----------------------------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------------------------------
+
+plot4 <- ggplot(data = lsoa_summary, aes(x = proportion_lihc_baseline, y = proportion_lihc_SA2)) +
+    geom_polygon(
+    data = background_data, 
+    aes(x = x, y = y, fill = zone, group = zone)
+  ) +
+  scale_fill_manual(values = zone_colors, guide = "none") +
+  geom_point(alpha = 0.8, color = "#ACE4E4") +
+  geom_point(size = 2, alpha = 0.8, shape = 21, stroke = 0.25, color = "black") +
+  geom_abline(intercept = 0, slope = 1, linetype = "solid", color = "black") +
+  scale_x_continuous(breaks = seq(0, 100, 10), limits = c(0, 100)) +
+  scale_y_continuous(breaks = seq(0, 100, 10), limits = c(0, 100)) +
+  labs(
+    title = "Scenario 2: LIHC fuel poverty",
+    x = "Baseline fuel poverty (%)",
+    y = "Scenario 2 fuel poverty (%)"
+  ) +
+  theme_bw() +
+  theme(axis.text.x = element_text(size = 10),
+        axis.text.y = element_text(size = 10),
+        plot.title = element_text(face = "bold", size = 11),
+        axis.title.x = element_text(size = 10),
+        axis.title.y = element_text(size = 10)) +
+  coord_fixed()
+
+
+# -----------------------------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------------------------------
+# Plot 5: proportion_lilee_baseline vs. proportion_lilee_SA1
+# -----------------------------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------------------------------
+
+plot5 <- ggplot(data = lsoa_summary, aes(x = proportion_lilee_baseline, y = proportion_lilee_SA1)) +
+    geom_polygon(
+    data = background_data, 
+    aes(x = x, y = y, fill = zone, group = zone)
+  ) +
+  scale_fill_manual(values = zone_colors, guide = "none") +
+  geom_point(alpha = 0.8, color = "#5A97BC") +
+  geom_point(size = 2, alpha = 0.8, shape = 21, stroke = 0.25, color = "black") +
+  geom_abline(intercept = 0, slope = 1, linetype = "solid", color = "black") +
+  scale_x_continuous(breaks = seq(0, 100, 10), limits = c(0, 100)) +
+  scale_y_continuous(breaks = seq(0, 100, 10), limits = c(0, 100)) +
+  labs(
+    title = "Scenario 1: LILEE* fuel poverty",
+    x = "Baseline fuel poverty (%)",
+    y = "Scenario 1 fuel poverty (%)"
+  ) +
+  theme_bw() +
+  theme(axis.text.x = element_text(size = 10),
+        axis.text.y = element_text(size = 10),
+        plot.title = element_text(face = "bold", size = 11),
+        axis.title.x = element_text(size = 10),
+        axis.title.y = element_text(size = 10)) +
+  coord_fixed()
+
+
+# -----------------------------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------------------------------
+# Plot 6: proportion_lilee_baseline vs. proportion_lilee_SA2
+# -----------------------------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------------------------------
+
+plot6 <- ggplot(data = lsoa_summary, aes(x = proportion_lilee_baseline, y = proportion_lilee_SA2)) +
+    geom_polygon(
+    data = background_data, 
+    aes(x = x, y = y, fill = zone, group = zone)
+  ) +
+  scale_fill_manual(values = zone_colors, guide = "none") +
+  geom_point(alpha = 0.8, color = "#5A97BC") +
+  geom_point(size = 2, alpha = 0.8, shape = 21, stroke = 0.25, color = "black") +
+  geom_abline(intercept = 0, slope = 1, linetype = "solid", color = "black") +
+  scale_x_continuous(breaks = seq(0, 100, 10), limits = c(0, 100)) +
+  scale_y_continuous(breaks = seq(0, 100, 10), limits = c(0, 100)) +
+  labs(
+    title = "Scenario 2: LILEE* fuel poverty",
+    x = "Baseline fuel poverty (%)",
+    y = "Scenario 2 fuel poverty (%)"
+  ) +
+  theme_bw() +
+  theme(axis.text.x = element_text(size = 10),
+        axis.text.y = element_text(size = 10),
+        plot.title = element_text(face = "bold", size = 11),
+        axis.title.x = element_text(size = 10),
+        axis.title.y = element_text(size = 10)) +
+  coord_fixed()
+
+
+# -----------------------------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------------------------------
+# Plot 7: proportion_mis_OR_10_baseline vs. proportion_mis_OR_10_SA1
+# -----------------------------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------------------------------
+
+plot7 <- ggplot(data = lsoa_summary, aes(x = proportion_mis_OR_10_baseline, y = proportion_mis_OR_10_SA1)) +
+    geom_polygon(
+    data = background_data, 
+    aes(x = x, y = y, fill = zone, group = zone)
+  ) +
+  scale_fill_manual(values = zone_colors, guide = "none") +
+  geom_point(alpha = 0.8, color = "#BB64B1") +
+  geom_point(size = 2, alpha = 0.8, shape = 21, stroke = 0.25, color = "black") +
+  geom_abline(intercept = 0, slope = 1, linetype = "solid", color = "black") +
+  scale_x_continuous(breaks = seq(0, 100, 10), limits = c(0, 100)) +
+  scale_y_continuous(breaks = seq(0, 100, 10), limits = c(0, 100)) +
+  labs(
+    title = "Scenario 1: TEF (10% | MIS) fuel poverty",
+    x = "Baseline fuel poverty (%)",
+    y = "Scenario 1 fuel poverty (%)"
+  ) +
+  theme_bw() +
+  theme(axis.text.x = element_text(size = 10),
+        axis.text.y = element_text(size = 10),
+        plot.title = element_text(face = "bold", size = 11),
+        axis.title.x = element_text(size = 10),
+        axis.title.y = element_text(size = 10)) +
+  coord_fixed()
+
+
+# -----------------------------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------------------------------
+# Plot 8: proportion_mis_OR_10_baseline vs. proportion_mis_OR_10_SA2 
+# -----------------------------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------------------------------
+
+plot8 <- ggplot(data = lsoa_summary, aes(x = proportion_mis_OR_10_baseline, y = proportion_mis_OR_10_SA2)) +
+    geom_polygon(
+    data = background_data, 
+    aes(x = x, y = y, fill = zone, group = zone)
+  ) +
+  scale_fill_manual(values = zone_colors, guide = "none") +
+  geom_point(alpha = 0.8, color = "#BB64B1") +
+  geom_point(size = 2, alpha = 0.8, shape = 21, stroke = 0.25, color = "black") +
+  geom_abline(intercept = 0, slope = 1, linetype = "solid", color = "black") +
+  scale_x_continuous(breaks = seq(0, 100, 10), limits = c(0, 100)) +
+  scale_y_continuous(breaks = seq(0, 100, 10), limits = c(0, 100)) +
+  labs(
+    title = "Scenario 2: TEF (10% | MIS) fuel poverty",
+    x = "Baseline fuel poverty (%)",
+    y = "Scenario 2 fuel poverty (%)"
+  ) +
+  theme_bw() +
+  theme(axis.text.x = element_text(size = 10),
+        axis.text.y = element_text(size = 10),
+        plot.title = element_text(face = "bold", size = 11),
+        axis.title.x = element_text(size = 10),
+        axis.title.y = element_text(size = 10)) +
+  coord_fixed()
+
+
+# -----------------------------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------------------------------
+# Add line of best fit to all plots
+# -----------------------------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------------------------------
+
+# The following function adds a line of best fit to each plot, showing the overall increase/reduction in fuel poverty for each set of S1 or S2 conditions versus the baseline 
+add_best_fit <- function(data, x_var, y_var, line_color) {
+  # Calculate linear model
+  formula_str <- as.formula(paste(y_var, "~", x_var))
+  fit <- lm(formula_str, data = data)
+  
+  # Return the abline layer
+  geom_abline(intercept = coef(fit)[1], 
+              slope = coef(fit)[2], 
+              color = line_color, 
+              linetype = "solid", 
+              linewidth = 0.7)
+}
+
+
+# --- Plot 1 & 2: 10% ---
+plot1 <- plot1 + add_best_fit(lsoa_summary, "proportion_10_baseline", "proportion_10_SA1", "#DDB0D9")
+plot2 <- plot2 + add_best_fit(lsoa_summary, "proportion_10_baseline", "proportion_10_SA2", "#DDB0D9")
+
+# --- Plot 3 & 4: LIHC ---
+plot3 <- plot3 + add_best_fit(lsoa_summary, "proportion_lihc_baseline", "proportion_lihc_SA1", "#ACE4E4")
+plot4 <- plot4 + add_best_fit(lsoa_summary, "proportion_lihc_baseline", "proportion_lihc_SA2", "#ACE4E4")
+
+# --- Plot 5 & 6: LILEE
+plot5 <- plot5 + add_best_fit(lsoa_summary, "proportion_lilee_baseline", "proportion_lilee_SA1", "#5A97BC")
+plot6 <- plot6 + add_best_fit(lsoa_summary, "proportion_lilee_baseline", "proportion_lilee_SA2", "#5A97BC")
+
+# --- Plot 7 & 8: 10% + MIS ---
+plot7 <- plot7 + add_best_fit(lsoa_summary, "proportion_mis_OR_10_baseline", "proportion_mis_OR_10_SA1", "#BB64B1")
+plot8 <- plot8 + add_best_fit(lsoa_summary, "proportion_mis_OR_10_baseline", "proportion_mis_OR_10_SA2", "#BB64B1")
+
+
+# -----------------------------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------------------------------
+# Present results for SA1 and SA2 as 2*2 grids
+# -----------------------------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------------------------------
+
+# Scenario 1 2*2 grid
+grid_s1 <- plot_grid(plot1, plot3, plot5, plot7, nrow = 2, align = "g")
+grid_s1
+
+# Scenario 2 2*2 grid
+grid_s2 <- plot_grid(plot2, plot4, plot6, plot8, nrow = 2, align = "g")
+grid_s2
+
+# Optional: save/export plots
+ggsave("s1_fp_grid.png", grid_s1, width = 8, height = 8, dpi = 300)
+ggsave("s2_fp_grid.png", grid_s2, width = 8, height = 8, dpi = 300)
+
+```
+
+
+7. Fuel poverty depth indicators in baseline, scenario 1 and scenario 2 conditions
+```{r}
+
+# Notes: the TEF includes two novel depth indicators based on the continuous monetary spectrum of energy costs over income (delta Y); these are referred to as the fuel poverty gap (the depth of poverty among fuel poor homes) and the fuel poverty buffer (the resilience of non-fuel-poor homes) 
+
+# ---------------------------------------------------------------------------------------------------------
+# ---------------------------------------------------------------------------------------------------------
+# Depth indicators: baseline conditions
+# ---------------------------------------------------------------------------------------------------------
+# ---------------------------------------------------------------------------------------------------------
+
+# Calculate the continuous spectrum of energy affordability (i.e., delta Y - 'delta_Y_10_baseline'): 10% gap (positive values) and buffer (negative values) in baseline conditions
+snh_tef <- snh_tef %>%
+  mutate(`delta_Y_10_baseline` = energy_costs - (0.10 * income))
+
+# Calculate the median 10% gap and buffer per LSOA in baseline conditions
+lsoa_depth_baseline <- snh_tef %>%
+  group_by(lsoa_2011) %>%
+  summarise(
+    # Median for values where delta Y >= 0 (the fuel poverty gap, among fuel poor population)
+    median_10_gap_baseline = median(delta_Y_10_baseline[delta_Y_10_baseline >= 0], na.rm = TRUE),
+    # Median for values where delta Y < 0 (the fuel poverty buffer, among non-fuel-poor population), returned as positive integer
+    median_10_buffer_baseline = as.integer(abs(median(delta_Y_10_baseline[delta_Y_10_baseline < 0], na.rm = TRUE))),
+    .groups = "drop"
+  )
+
+# ---------------------------------------------------------------------------------------------------------
+# ---------------------------------------------------------------------------------------------------------
+# Depth indicators: scenario 1 (SA1) conditions
+# ---------------------------------------------------------------------------------------------------------
+# ---------------------------------------------------------------------------------------------------------
+
+# Calculate the continuous spectrum of energy affordability (i.e., delta Y - 'delta_Y_10_SA1'): 10% gap (positive values) and buffer (negative values) in scenario 1 conditions
+snh_tef <- snh_tef %>%
+  mutate(`delta_Y_10_SA1` = energy_costs_SA1 - (0.10 * income))
+
+# Calculate the median 10% gap and buffer per LSOA in scenario 1 conditions
+lsoa_depth_SA1 <- snh_tef %>%
+  group_by(lsoa_2011) %>%
+  summarise(
+    # Median for values where delta Y >= 0 (the fuel poverty gap, among fuel poor population)
+    median_10_gap_SA1 = median(delta_Y_10_SA1[delta_Y_10_SA1 >= 0], na.rm = TRUE),
+    # Median for values where delta Y < 0 (the fuel poverty buffer, among non-fuel-poor population), returned as positive integer
+    median_10_buffer_SA1 = as.integer(abs(median(delta_Y_10_SA1[delta_Y_10_SA1 < 0], na.rm = TRUE))),
+    .groups = "drop"
+  )
+
+
+# ---------------------------------------------------------------------------------------------------------
+# ---------------------------------------------------------------------------------------------------------
+# Depth indicators: scenario 2 (SA2) conditions
+# ---------------------------------------------------------------------------------------------------------
+# ---------------------------------------------------------------------------------------------------------
+
+# Calculate the continuous spectrum of energy affordability (i.e., delta Y - 'delta_Y_10_SA2'): 10% gap (positive values) and buffer (negative values) in scenario 2 conditions
+snh_tef <- snh_tef %>%
+  mutate(`delta_Y_10_SA2` = energy_costs_SA2 - (0.10 * income_SA2))
+
+# Calculate the median 10% gap and buffer per LSOA in scenario 2 conditions
+lsoa_depth_SA2 <- snh_tef %>%
+  group_by(lsoa_2011) %>%
+  summarise(
+    # Median for values where delta Y >= 0 (the fuel poverty gap, among fuel poor population)
+    median_10_gap_SA2 = median(delta_Y_10_SA2[delta_Y_10_SA2 >= 0], na.rm = TRUE),
+    # Median for values where delta Y < 0 (the fuel poverty buffer, among non-fuel-poor population), returned as positive integer
+    median_10_buffer_SA2 = as.integer(abs(median(delta_Y_10_SA2[delta_Y_10_SA2 < 0], na.rm = TRUE))),
+    .groups = "drop"
+  )
+
+
+# ---------------------------------------------------------------------------------------------------------
+# ---------------------------------------------------------------------------------------------------------
+# Visualising the distribution of delta Y in example LSOAs
+# ---------------------------------------------------------------------------------------------------------
+# ---------------------------------------------------------------------------------------------------------
+
+# Notes: to better understand changes in delta Y across the scenarios, the following provides distributions of delta Y in baseline, SA1 and SA2 for two LSOAs: one that is relatively deprived (LSOA E01013965) and one relatively affluent (LSOA E01013977)
+
+# Create subset of deprived LSOA E01013965 and pivot for density plot
+lsoa_E01013965 <- snh_tef %>%
+  dplyr::filter(lsoa_2011 == "E01013965")
+
+plot_data_E01013965 <- lsoa_E01013965 %>%
+  dplyr::select(delta_Y_10_baseline, 
+                delta_Y_10_SA1, 
+                delta_Y_10_SA2) %>%
+  tidyr::pivot_longer(cols = everything(), 
+                      names_to = "Variable", 
+                      values_to = "Value")
+
+
+# Create subset of affluent LSOA E01013977 and pivot for density plot
+lsoa_E01013977 <- snh_tef %>%
+  dplyr::filter(lsoa_2011 == "E01013977")
+
+plot_data_E01013977 <- lsoa_E01013977 %>%
+  dplyr::select(delta_Y_10_baseline, 
+                delta_Y_10_SA1, 
+                delta_Y_10_SA2) %>%
+  tidyr::pivot_longer(cols = everything(), 
+                      names_to = "Variable", 
+                      values_to = "Value")
+
+
+# Define shared limits for comparability of both LSOAs in subsequent visualisations
+x_lims <- c(-8000, 8000)
+y_lims <- c(0, 0.0005) 
+
+
+# ---------------------------------------------------------------------------------------------------------
+# ---------------------------------------------------------------------------------------------------------
+# Plot Y1 - distribution of delta Y in E01013965
+# ---------------------------------------------------------------------------------------------------------
+# ---------------------------------------------------------------------------------------------------------
+
+plot_y1 <- ggplot(plot_data_E01013965, aes(x = Value, fill = Variable)) +
+  geom_density(alpha = 0.3, linewidth = 0.5) + 
+  geom_vline(xintercept = 0, linetype = "dashed", color = "darkred", linewidth = 0.75) +
+  coord_cartesian(xlim = x_lims, ylim = y_lims) + 
+  scale_fill_manual(values = c(
+    "delta_Y_10_baseline" = "steelblue", 
+    "delta_Y_10_SA1" = "darkgreen", 
+    "delta_Y_10_SA2" = "darkred"
+  )) +
+labs(x = expression(Delta * italic(Y) * ": resilience (buffer) / depth (gap) (£/yr); 0 = 10% poverty threshold"), 
+       y = "Density",
+       title = "'Deprived' LSOA: E01013965 (n=521)") +
+  annotate("text", x = -3500, y = 0.0004, 
+           label = "paste('Buffer zone (', Delta, italic(Y) < 0, ')') ", 
+           parse = TRUE,
+           size = 4, color = "darkgreen", fontface = "bold") +
+  annotate("text", x = 3500, y = 0.0004, 
+           label = "paste('Gap zone (', Delta, italic(Y) > 0, ')') ", 
+           parse = TRUE,
+           size = 4, color = "darkred", fontface = "bold") +
+  scale_x_continuous(breaks = seq(-8000, 8000, 1000)) +
+  scale_y_continuous(breaks = seq(0, 0.0005, 0.0001)) +
+  theme_bw() +
+  theme(axis.text.x = element_text(size = 10),
+        axis.text.y = element_text(size = 10),
+        plot.title = element_text(face = "bold", size = 11),
+        axis.title.x = element_text(size = 10),
+        axis.title.y = element_text(size = 10),
+        legend.position = "none")
+
+
+# ---------------------------------------------------------------------------------------------------------
+# ---------------------------------------------------------------------------------------------------------
+# Plot Y2 - distribution of delta Y in E01013977
+# ---------------------------------------------------------------------------------------------------------
+# ---------------------------------------------------------------------------------------------------------
+
+plot_y2 <- ggplot(plot_data_E01013977, aes(x = Value, fill = Variable)) +
+  geom_density(alpha = 0.3, linewidth = 0.5) + 
+  geom_vline(xintercept = 0, linetype = "dashed", color = "darkred", size = 0.75) +
+  coord_cartesian(xlim = x_lims, ylim = y_lims) + 
+  scale_fill_manual(
+    values = c(
+      "delta_Y_10_baseline" = "steelblue", 
+      "delta_Y_10_SA1" = "darkgreen", 
+      "delta_Y_10_SA2" = "darkred"
+    ),
+    labels = c(
+      "Baseline",
+      "Scenario 1 ('optimistic' case)",
+      "Scenario 2 ('pessimistic' case)"
+    )
+  ) +
+labs(x = expression(Delta * italic(Y) * ": resilience (buffer) / depth (gap) (£/yr); 0 = 10% poverty threshold"), 
+       y = "Density",
+       title = "'Affluent' LSOA: E01013977 (n=486)") +
+  annotate("text", x = -3500, y = 0.0004, 
+           label = "paste('Buffer zone (', Delta, italic(Y) < 0, ')') ", 
+           parse = TRUE,
+           size = 4, color = "darkgreen", fontface = "bold") +
+  annotate("text", x = 3500, y = 0.0004, 
+           label = "paste('Gap zone (', Delta, italic(Y) > 0, ')') ", 
+           parse = TRUE,
+           size = 4, color = "darkred", fontface = "bold") +
+  scale_x_continuous(breaks = seq(-8000, 8000, 1000), limits = c(-8000, 8000)) +
+  scale_y_continuous(breaks = seq(0, 0.0005, 0.0001), limits = c(0, 0.0005)) +
+  theme_bw() +
+  theme(axis.text.x = element_text(size = 10),
+        axis.text.y = element_text(size = 10),
+        plot.title = element_text(face = "bold", size = 11),
+        axis.title.x = element_text(size = 10),
+        axis.title.y = element_text(size = 10),
+        legend.position = "bottom",
+        legend.text = element_text(size = 11),
+        legend.title = element_blank())
+
+# Make 2*1 grid for inter-LSOA comparison of delta Y
+grid_depth <- plot_grid(plot_y1, plot_y2, nrow = 2, align = "g")
+grid_depth
+
+```
+
+8. 10% and TEF fuel poverty cross-tabulations
+```{r}
+
+# Create a categorical LIHC column (i.e. LIHC and subcategories)
+snh_tef <- snh_tef %>%
+  mutate(
+    LIHC_cats = case_when(
+      energy_costs > 2252 & income < 18840 + energy_costs ~ "LIHC",
+      energy_costs < 2252 & income < 18840 + energy_costs ~ "LILC",
+      energy_costs < 2252 & income > 18840 + energy_costs ~ "HILC",
+      energy_costs > 2252 & income > 18840 + energy_costs ~ "HIHC",
+      TRUE                                 ~ NA_character_  # Catches rows exactly matching 2252 or 18840
+    )
+  )
+
+# Create a categorical LILEE column (i.e. LILEE and subcategories)
+snh_tef <- snh_tef %>%
+  mutate(
+    LILEE_cats = case_when(
+      current_energy_efficiency < 69  & income <  pov_line_2021_energy_costs ~ "LILEE",
+      current_energy_efficiency < 69  & income >= pov_line_2021_energy_costs ~ "HILEE",
+      current_energy_efficiency >= 69 & income <  pov_line_2021_energy_costs ~ "LIHEE",
+      current_energy_efficiency >= 69 & income >= pov_line_2021_energy_costs ~ "HIHEE",
+      TRUE                                                                   ~ NA_character_
+    )
+  )
+
+
+# Cross-tabulations: i) 10% vs LIHC cats; ii) 10% vs LILEE cats; iii) TEF (10%+MIS) vs LIHC; iv) TEF vs LILEE
+t1 <- table(snh_tef$LIHC_cats, snh_tef$categorical_10)
+t1_prop <- proportions(t1, margin = 1)
+round(t1_prop * 100, 2)
+
+t2 <- table(snh_tef$LILEE_cats, snh_tef$categorical_10)
+t2_prop <- proportions(t2, margin = 1)
+round(t2_prop * 100, 2)
+
+t3 <- table(snh_tef$LIHC_cats, snh_tef$mis_OR_10_capped)
+t3_prop <- proportions(t3, margin = 1)
+round(t3_prop * 100, 2)
+
+t4 <- table(snh_tef$LILEE_cats, snh_tef$mis_OR_10_capped)
+t4_prop <- proportions(t4, margin = 1)
+round(t4_prop * 100, 2)
+
+```
+
+
